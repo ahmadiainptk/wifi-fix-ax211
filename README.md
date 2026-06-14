@@ -1,37 +1,39 @@
 # wifi-fix-ax211
 
-Auto-recovery untuk Intel Wi-Fi 6E AX211 (dan turunannya) yang sering drop / device menghilang di Linux.
+Auto-recovery for Intel Wi-Fi 6E AX211 (and similar) that frequently drops / device disappears on Linux.
 
-## 📋 Masalah
+> 🇮🇩 **Bahasa Indonesia?** Lihat [README_ID.md](README_ID.md)
 
-Device WiFi **Intel AX211** di Linux (khususnya kernel modern + iwlwifi driver) kadang mengalami:
+## 📋 The Problem
 
-- Device WiFi **menghilang random** dari `iw dev` / `ip link`
-- `rfkill list` menunjukkan device masih ada tapi radio **off**
-- NetworkManager tidak bisa reconnect
-- Tidak ada notifikasi sama sekali — user cuma tahu saat buka browser dan tidak ada internet
+**Intel AX211** WiFi devices on Linux (especially with modern kernels + iwlwifi driver) sometimes experience:
 
-Workaround: **reload driver iwlwifi + iwlmvm**, lalu tunggu interface muncul lagi. Tapi ini harus manual via terminal.
+- WiFi device **randomly disappears** from `iw dev` / `ip link`
+- `rfkill list` shows the device is still there, but the radio is **off**
+- NetworkManager cannot reconnect
+- No notification at all — user only realizes when opening a browser with no internet
 
-## ✨ Solusi
+Workaround: **reload the iwlwifi + iwlmvm drivers**, then wait for the interface to come back. But this has to be done manually via terminal.
 
-Repo ini menyediakan:
+## ✨ The Solution
 
-1. **`fix-wifi`** — script reload driver dengan retry otomatis
-2. **NetworkManager dispatcher** — deteksi otomatis saat WiFi down, kirim notifikasi persistent dengan tombol "Perbaiki WiFi"
+This repo provides:
+
+1. **`fix-wifi`** — driver reload script with automatic retry
+2. **NetworkManager dispatcher** — automatic detection when WiFi goes down, sends a persistent notification with "Perbaiki WiFi" button
 
 Behavior:
-- WiFi down → tunggu 12s untuk NM auto-reconnect (silent kalau berhasil)
-- Masih down → notifikasi **persistent** muncul (urgency=critical, gak auto-dismiss)
-- Klik "Perbaiki WiFi" → jalankan `fix-wifi` → notifikasi hasil
-- WiFi auto-reconnect saat notif tampil → otomatis dismiss notif + info
+- WiFi goes down → wait 12s for NM auto-reconnect (silent if successful)
+- Still down → **persistent** notification appears (urgency=critical, won't auto-dismiss)
+- Click "Perbaiki WiFi" → runs `fix-wifi` → result notification
+- WiFi auto-reconnects while notification is up → auto-dismiss notification + info
 
 ## 🖥️ Tested on
 
 | Item | Detail |
 |------|--------|
 | **OS** | CachyOS (Arch-based) |
-| **Kernel** | linux-cachyos (tested pada 6.x) |
+| **Kernel** | linux-cachyos (tested on 6.x) |
 | **Desktop** | Hyprland (Wayland) |
 | **Shell** | bash 5.x |
 | **Init** | systemd |
@@ -43,9 +45,9 @@ Behavior:
 ## 📦 Requirements
 
 - `bash`, `sudo`, `iw`, `nmcli` (NetworkManager), `modprobe` (kmod), `gdbus` (glib2)
-- Linux kernel dengan modul `iwlwifi` dan `iwlmvm`
-- User dengan `sudo` privilege untuk `fix-wifi`
-- D-Bus session bus aktif (untuk notifikasi)
+- Linux kernel with `iwlwifi` and `iwlmvm` modules
+- User with `sudo` privilege for `fix-wifi`
+- Active D-Bus session bus (for notifications)
 
 ## 🚀 Install
 
@@ -56,29 +58,29 @@ chmod +x install.sh uninstall.sh
 sudo ./install.sh
 ```
 
-Installer akan:
-1. Copy `fix-wifi` ke `~/.local/bin/`
-2. Set sudoers NOPASSWD untuk `fix-wifi`
-3. Install dispatcher ke `/etc/NetworkManager/dispatcher.d/99-wifi-fix`
-4. Patch user config otomatis
+The installer will:
+1. Copy `fix-wifi` to `~/.local/bin/`
+2. Set sudoers NOPASSWD for `fix-wifi`
+3. Install dispatcher to `/etc/NetworkManager/dispatcher.d/99-wifi-fix`
+4. Auto-patch user config
 
 ## 🧪 Test
 
-Manual test WiFi recovery:
+Manual WiFi recovery test:
 ```bash
 sudo fix-wifi
 ```
 
-Test notifikasi:
+Notification test:
 ```bash
-# Lihat real-time log dispatcher
+# Watch real-time dispatcher log
 journalctl -t wifi-fix -t fix-wifi -f
 
 # Trigger WiFi down
-nmcli device disconnect wlan0   # ganti dengan interface lo
+nmcli device disconnect wlan0   # replace with your interface
 ```
 
-Tunggu 12-15 detik. Notifikasi persistent akan muncul.
+Wait 12-15 seconds. Persistent notification will appear.
 
 ## 🗑️ Uninstall
 
@@ -86,92 +88,98 @@ Tunggu 12-15 detik. Notifikasi persistent akan muncul.
 sudo ./uninstall.sh
 ```
 
-## 🔧 Cara Kerja
+## 🔧 How It Works
 
 ### `fix-wifi` (manual recovery)
 
-Loop sampai 10×:
+Loop up to 10×:
 1. `modprobe -r iwlmvm iwlwifi`
-2. Tunggu 2 detik
+2. Wait 2 seconds
 3. `modprobe iwlwifi`
-4. Cek `iw dev` untuk interface baru
-5. Tunggu koneksi NetworkManager (max 15s)
-6. Kalau connected → exit 0
-7. Kalau interface gak muncul → retry
+4. Check `iw dev` for new interface
+5. Wait for NetworkManager connection (max 15s)
+6. If connected → exit 0
+7. If interface doesn't appear → retry
 
 ### Dispatcher (auto-detection)
 
-Setiap NetworkManager event interface → dispatcher dijalankan:
-- Filter: hanya `wlan*` dan event `down`
-- **Cooldown 60s** per interface (cegah spam)
-- **Smart-skip #1**: skip kalau ada wifi interface lain yang sudah connected (efek rename setelah driver reload)
-- **Smart-skip #2**: tunggu 12s, kalau NM auto-reconnect berhasil → silent exit
-- **Kirim notif persistent** (urgency=critical, timeout=0) dengan 1 action: `fix`
-- **Monitor paralel**:
-  - `gdbus monitor` untuk tangkap `ActionInvoked` signal
-  - Polling `nmcli` setiap 3s untuk detect auto-reconnect
+Every NetworkManager interface event → dispatcher runs:
+- Filter: only `wlan*` and `down` event
+- **Cooldown 60s** per interface (prevents spam)
+- **Smart-skip #1**: skip if another wifi interface is already connected (rename effect after driver reload)
+- **Smart-skip #2**: wait 12s, if NM auto-reconnect succeeds → silent exit
+- **Send persistent notification** (urgency=critical, timeout=0) with 1 action: `fix`
+- **Parallel monitoring**:
+  - `gdbus monitor` to catch `ActionInvoked` signal
+  - `nmcli` polling every 3s to detect auto-reconnect
 - Whichever fires first → dispatch
 
-## 📁 Struktur Repo
+## 📁 Repo Structure
 
 ```
 wifi-fix-ax211/
-├── README.md
+├── README.md           (English)
+├── README_ID.md        (Bahasa Indonesia)
 ├── LICENSE
-├── install.sh                # Installer
-├── uninstall.sh              # Uninstaller
+├── install.sh          # Installer
+├── uninstall.sh        # Uninstaller
 ├── scripts/
-│   └── fix-wifi              # Main reload script
+│   └── fix-wifi        # Main reload script
 ├── etc/
-│   └── 99-wifi-fix           # NM dispatcher
-└── assets/                   # Screenshots, logo
+│   └── 99-wifi-fix     # NM dispatcher
+└── assets/             # Screenshots, logo
 ```
 
 ## 🔍 Troubleshooting
 
-**Notifikasi gak muncul**
-- Cek: `journalctl -t wifi-fix -t fix-wifi -n 20`
-- Pastikan notif daemon support D-Bus standard (`dunst`, `mako`, `dms`, `gnome-shell`, `kde`)
-- Test manual: `gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications --method org.freedesktop.Notifications.Notify "Test" "" "Test" "Body" "[]" "{}" 5000`
+**Notification doesn't appear**
+- Check: `journalctl -t wifi-fix -t fix-wifi -n 20`
+- Make sure your notif daemon supports standard D-Bus (`dunst`, `mako`, `dms`, `gnome-shell`, `kde`)
+- Manual test: `gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications --method org.freedesktop.Notifications.Notify "Test" "" "Test" "Body" "[]" "{}" 5000`
 
-**Dispatcher gak fire**
-- Pastikan file di `/etc/NetworkManager/dispatcher.d/` (root, bukan subfolder)
-- Mode harus 755 executable
+**Dispatcher doesn't fire**
+- Make sure file is at `/etc/NetworkManager/dispatcher.d/` (root, not subfolder)
+- Mode must be 755 executable
 - Test: `nmcli device disconnect wlan0; sleep 15; journalctl -t wifi-fix -n 5`
 
-**fix-wifi gak bisa reload**
-- Perlu sudo privilege untuk `modprobe`
-- Cek apakah `iwlmvm` dan `iwlwifi` di-blacklist: `cat /etc/modprobe.d/blacklist.conf`
-- Test manual: `sudo modprobe -r iwlmvm iwlwifi; sleep 2; sudo modprobe iwlwifi`
+**fix-wifi can't reload**
+- Need sudo privilege for `modprobe`
+- Check if `iwlmvm` and `iwlwifi` are blacklisted: `cat /etc/modprobe.d/blacklist.conf`
+- Manual test: `sudo modprobe -r iwlmvm iwlwifi; sleep 2; sudo modprobe iwlwifi`
+
+**Notification has no action buttons**
+- Some notif daemons (especially minimal ones like `dunst` with custom rules) might hide actions
+- dms: should work out of the box
+- dunst: needs `summary_format` and `urgency = critical` configured
 
 ## 🤝 Contributing
 
-PR welcome! Kalau lo punya device WiFi lain yang juga drop random (bukan cuma AX211), bisa generalize script untuk support multiple device. Kasih tahu PCI ID + driver name di issue.
+PRs welcome! If you have other WiFi devices that also drop randomly (not just AX211), feel free to generalize the script to support multiple devices. Mention the PCI ID + driver name in the issue.
 
 ## 📜 License
 
-MIT License — lihat [LICENSE](LICENSE).
+MIT License — see [LICENSE](LICENSE).
 
 ## ⚠️ Disclaimer
 
-Script ini hanya workaround untuk bug driver/hardware. Penyebab root mungkin:
-- Firmware iwlwifi outdated (`iwlwifi-ty-a0-gf-a0-*.ucode`)
-- Power management aggressive (`iwlmvm.power_scheme`)
+This script is only a workaround for a driver/hardware bug. The root cause might be:
+- Outdated iwlwifi firmware (`iwlwifi-ty-a0-gf-a0-*.ucode`)
+- Aggressive power management (`iwlmvm.power_scheme`)
 - BIOS/UEFI WiFi power saving
 - Kernel regression
 
-Coba dulu:
+Try these first:
 ```bash
-# Disable power saving untuk iwlmvm
+# Disable power saving for iwlmvm
 echo "options iwlmvm power_scheme=1" | sudo tee /etc/modprobe.d/iwlmvm.conf
-# Update firmware ke terbaru
+# Update firmware to latest
 sudo pacman -S linux-firmware
 ```
 
-Kalau masih drop setelah patch firmware + power management, baru pakai script ini sebagai band-aid.
+If it still drops after firmware + power management patches, then use this script as a band-aid.
 
 ## 👤 Author
 
-**ahmadiainptk** — IT Admin di IAIN Pontianak
+**ahmadiainptk** — IT Admin at IAIN Pontianak
 - GitHub: [@ahmadiainptk](https://github.com/ahmadiainptk)
 - Email: ahmad.iainptk@gmail.com
