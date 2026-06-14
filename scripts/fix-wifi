@@ -1,0 +1,58 @@
+#!/bin/bash
+# fix-wifi - Reload Intel AX211 driver sampai radio hidup & konek
+# Usage: sudo fix-wifi
+#
+# Tested on:
+#   - CachyOS (Arch-based) with linux-cachyos kernel
+#   - Intel Wi-Fi 6E AX211 (PCI 8086:51f0)
+#   - NetworkManager + systemd
+#
+# Author: ahmadiainptk
+
+set +e  # Jangan exit di error, biar semua log muncul
+
+if [ "$EUID" -ne 0 ]; then
+    echo "Jalankan dengan sudo: sudo fix-wifi"
+    exit 1
+fi
+
+MAX_RETRIES=10
+RELOAD_DELAY=2
+CONNECT_WAIT=15
+
+for attempt in $(seq 1 $MAX_RETRIES); do
+    echo "🔄 [$attempt/$MAX_RETRIES] Reloading iwlwifi + iwlmvm..."
+    modprobe -r iwlmvm iwlwifi 2>/dev/null
+    sleep $RELOAD_DELAY
+    modprobe iwlwifi
+    sleep 3
+
+    WIFI_IF=$(iw dev 2>/dev/null | grep Interface | awk '{print $2}' | head -1)
+
+    if [ -z "$WIFI_IF" ]; then
+        echo "⚠️  Interface tidak muncul, retry..."
+        continue
+    fi
+
+    echo "✅ Radio hidup: $WIFI_IF"
+    echo "⏳ Menunggu koneksi (maks ${CONNECT_WAIT}s)..."
+
+    for i in $(seq 1 $CONNECT_WAIT); do
+        STATE=$(nmcli -t -f GENERAL.STATE device show "$WIFI_IF" 2>/dev/null | cut -d: -f2)
+        if echo "$STATE" | grep -q "100"; then
+            echo ""
+            nmcli device show "$WIFI_IF" | grep -E "DEVICE|STATE|CONNECTION|IP4.ADDRESS|IP4.GATEWAY"
+            echo "🎉 Connected!"
+            exit 0
+        fi
+        printf "."
+        sleep 1
+    done
+
+    echo ""
+    echo "📡 Radio hidup, belum ada jaringan yang cocok. Silakan koneksikan manual."
+    exit 0
+done
+
+echo "❌ Gagal setelah $MAX_RETRIES percobaan. Coba reboot."
+exit 1

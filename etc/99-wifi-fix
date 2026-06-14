@@ -1,0 +1,208 @@
+#!/bin/bash
+# /etc/NetworkManager/dispatcher.d/99-wifi-fix
+# NM dispatcher: deteksi WiFi down → desktop notif persistent + fix-wifi
+#
+# Dipanggil otomatis oleh NetworkManager setiap event interface.
+# Filter: hanya jalan untuk event "down" pada interface wlan*.
+#
+# Tested on:
+#   - CachyOS + Hyprland (Wayland)
+#   - DankMaterialShell (dms) sebagai notification daemon
+#   - NetworkManager + systemd
+#
+# Author: ahmadiainptk
+
+IFACE="$1"
+EVENT="$2"
+
+[[ "$EVENT" != "down" ]] && exit 0
+[[ "$IFACE" != wlan* ]] && exit 0
+
+# === COOLDOWN: cegah spam saat WiFi naik-turun cepat ===
+LOCKFILE="/tmp/wifi-fix-lock.$IFACE"
+COOLDOWN_SEC=60
+
+if [ -f "$LOCKFILE" ]; then
+    LOCK_AGE=$(($(date +%s) - $(stat -c %Y "$LOCKFILE")))
+    if [ "$LOCK_AGE" -lt "$COOLDOWN_SEC" ]; then
+        logger -t wifi-fix "Cooldown aktif (${LOCK_AGE}s), skip."
+        exit 0
+    fi
+fi
+
+# === SMART-SKIP #1: rename effect ===
+# Setelah fix-wifi reload driver, nama interface berubah (wlan37 → wlan38).
+# NM fire "down" untuk interface lama — skip kalau interface lain sudah connected.
+OTHER_UP=$(/usr/bin/nmcli -t -f DEVICE,STATE device status 2>/dev/null | \
+    awk -F: '$1 ~ /^wlan/ && $1 != "'"$IFACE"'" && $2 == "100" {print $1; exit}')
+if [ -n "$OTHER_UP" ]; then
+    logger -t wifi-fix "Skip: $OTHER_UP sudah connected (rename effect), $IFACE down."
+    exit 0
+fi
+
+# === SMART-SKIP #2: auto-reconnect window ===
+# NM biasanya auto-reconnect dalam beberapa detik. Tunggu 12s; kalau sudah
+# connected → silent exit, gak kirim notif sama sekali.
+logger -t wifi-fix "WiFi $IFACE down, tunggu auto-reconnect 12s..."
+for i in 1 2 3 4; do
+    sleep 3
+    if /usr/bin/nmcli -t -f DEVICE,STATE device status 2>/dev/null | grep -q "^wlan.*:100"; then
+        logger -t wifi-fix "Auto-reconnect dalam ${i}×3s, skip notif."
+        exit 0
+    fi
+done
+
+# Masih down → kirim notif persistent
+touch "$LOCKFILE"
+logger -t wifi-fix "WiFi masih down, kirim notif persistent..."
+
+# === USER ENVIRONMENT ===
+USER_NAME="baha"
+USER_UID=1000
+XDG_RUNTIME_DIR="/run/user/$USER_UID"
+
+[ -S "$XDG_RUNTIME_DIR/bus" ] || { logger -t wifi-fix "Session bus tidak ada, skip."; exit 0; }
+
+DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+
+# Helper: jalankan command sebagai user, error di-log ke journal
+run_user() {
+    local ERR=$(mktemp)
+    sudo -u "$USER_NAME" \
+        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+        DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+        "$@" 2>"$ERR"
+    local R=$?
+    if [ -s "$ERR" ]; then
+        logger -t wifi-fix "run_user err (cmd=$1, ret=$R): $(tr '\n' ' ' < "$ERR")"
+    fi
+    /usr/bin/rm -f "$ERR"
+    return $R
+}
+
+# Helper: kirim notification via D-Bus standard
+# Urgency byte: 0=low 1=normal 2=critical (persistent)
+send_notif() {
+    run_user gdbus call --session \
+        --dest org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications \
+        --method org.freedesktop.Notifications.Notify \
+        "WiFi Fix" 0 "$1" "$2" "$3" "$4" \
+        "{'urgency': <byte ${6:-1}>}" "$5" 2>&1
+}
+
+send_notif_silent() {
+    send_notif "$1" "$2" "$3" "$4" "$5" "${6:-1}" >/dev/null 2>&1
+}
+
+close_notif() {
+    run_user gdbus call --session \
+        --dest org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications \
+        --method org.freedesktop.Notifications.CloseNotification \
+        "$1" >/dev/null 2>&1
+}
+
+# === KIRIM NOTIF KONFIRMASI (persistent) ===
+# Hanya 1 action "fix". "Dismiss" auto dari sistem untuk body click (default action).
+NID_RAW=$(send_notif \
+    "network-wireless-disconnected" \
+    "⚠️ WiFi Terputus" \
+    "WiFi ($IFACE) down >12s. Klik 'Perbaiki WiFi' untuk fix-wifi manual." \
+    "['fix','Perbaiki WiFi']" \
+    0 \
+    2)
+
+NID=$(echo "$NID_RAW" | sed -E 's/.*uint32 ([0-9]+).*/\1/' 2>/dev/null)
+if ! [[ "$NID" =~ ^[0-9]+$ ]]; then
+    logger -t wifi-fix "Gagal kirim notif: $NID_RAW"
+    exit 0
+fi
+logger -t wifi-fix "Notif persistent NID=$NID, menunggu aksi..."
+
+TMPDIR=$(mktemp -d)
+trap "/usr/bin/rm -rf '$TMPDIR'" EXIT
+
+# === PARALLEL: monitor action + monitor auto-reconnect ===
+
+# Poller: cek apakah wifi auto-reconnect saat notif tampil
+(
+    for i in $(seq 1 100); do  # 100 × 3s = 5 min
+        if /usr/bin/nmcli -t -f DEVICE,STATE device status 2>/dev/null | grep -q "^wlan.*:100"; then
+            echo "WIFI_UP" > "$TMPDIR/poll"
+            break
+        fi
+        sleep 3
+    done
+) &
+POLL_PID=$!
+
+# Action monitor (no timeout, jalan sampai ada action atau di-kill)
+(
+    run_user gdbus monitor --session \
+        --dest org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications 2>/dev/null | \
+        grep "ActionInvoked" | \
+        grep -m1 "(uint32 $NID, " | \
+        sed -E "s/.*uint32 $NID, '([^']+)'.*/\1/" > "$TMPDIR/action"
+) &
+ACTION_PID=$!
+
+# Tunggu salah satu fire
+while kill -0 $POLL_PID 2>/dev/null && kill -0 $ACTION_PID 2>/dev/null; do
+    sleep 1
+done
+
+ACTION=$(cat "$TMPDIR/action" 2>/dev/null)
+WIFI_AUTO=$(cat "$TMPDIR/poll" 2>/dev/null)
+
+kill $POLL_PID $ACTION_PID 2>/dev/null
+wait 2>/dev/null
+
+close_notif "$NID"
+
+# === DISPATCH ===
+if [ "$WIFI_AUTO" = "WIFI_UP" ]; then
+    logger -t wifi-fix "Auto-reconnect saat notif tampil, dismissed."
+    send_notif_silent \
+        "network-wireless" \
+        "✓ WiFi Auto-Reconnect" \
+        "Device sudah online sendiri. fix-wifi tidak perlu dijalankan." \
+        "[]" \
+        5000 \
+        1
+elif [ "$ACTION" = "fix" ]; then
+    logger -t wifi-fix "User klik 'Perbaiki WiFi'..."
+    FIX_OUTPUT=$(/home/baha/.local/bin/fix-wifi 2>&1)
+    FIX_RET=$?
+    logger -t fix-wifi "$FIX_OUTPUT"
+
+    if [ "$FIX_RET" -eq 0 ]; then
+        send_notif_silent \
+            "network-wireless" \
+            "✅ WiFi Berhasil" \
+            "$(echo "$FIX_OUTPUT" | tail -8)" \
+            "[]" \
+            8000 \
+            1
+    else
+        send_notif_silent \
+            "network-error" \
+            "❌ WiFi Gagal" \
+            "fix-wifi exit=$FIX_RET.\n\n$(echo "$FIX_OUTPUT" | tail -10)\n\nCoba manual: sudo fix-wifi" \
+            "[]" \
+            15000 \
+            1
+    fi
+elif [ "$ACTION" = "dismiss" ] || [ "$ACTION" = "default" ]; then
+    logger -t wifi-fix "User dismiss (body click / sistem dismiss)."
+else
+    logger -t wifi-fix "Timeout 5min, dismiss notif."
+    send_notif_silent \
+        "dialog-warning" \
+        "WiFi Masih Down" \
+        "Auto-reconnect gagal. Untuk fix manual: sudo fix-wifi" \
+        "[]" \
+        15000 \
+        1
+fi
