@@ -1,6 +1,6 @@
 #!/bin/bash
 # install.sh - Installer untuk wifi-fix-ax211
-# Usage: ./install.sh
+# Usage: sudo ./install.sh
 
 set -e
 
@@ -22,9 +22,9 @@ USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 echo "🔧 Installing for user: $SUDO_USER (uid=$USER_UID, home=$USER_HOME)"
 
 # === 1. Install fix-wifi script ===
-echo "📦 Installing fix-wifi to /home/$SUDO_USER/.local/bin/..."
-install -d -m 755 -o "$SUDO_USER" -g "$SUDO_USER" "/home/$SUDO_USER/.local/bin"
-install -m 755 -o "$SUDO_USER" -g "$SUDO_USER" scripts/fix-wifi "/home/$SUDO_USER/.local/bin/fix-wifi"
+echo "📦 Installing fix-wifi to $USER_HOME/.local/bin/..."
+install -d -m 755 -o "$SUDO_USER" -g "$SUDO_USER" "$USER_HOME/.local/bin"
+install -m 755 -o "$SUDO_USER" -g "$SUDO_USER" scripts/fix-wifi "$USER_HOME/.local/bin/fix-wifi"
 
 # === 2. Sudoers: NOPASSWD untuk fix-wifi ===
 echo "🔐 Configuring sudoers..."
@@ -44,12 +44,41 @@ sed -i "s/^USER_NAME=.*/USER_NAME=\"$SUDO_USER\"/" /etc/NetworkManager/dispatche
 sed -i "s|^USER_UID=.*|USER_UID=$USER_UID|" /etc/NetworkManager/dispatcher.d/99-wifi-fix
 chmod 755 /etc/NetworkManager/dispatcher.d/99-wifi-fix
 
-# === 4. Verifikasi ===
+# === 4. NetworkManager configuration tweaks (optional but recommended) ===
+echo "📡 Installing NM config tweaks..."
+install -d -m 755 /etc/NetworkManager/conf.d
+install -m 644 -o root -g root etc/NetworkManager/conf.d/wifi_backend.conf /etc/NetworkManager/conf.d/wifi_backend.conf
+install -m 644 -o root -g root etc/NetworkManager/conf.d/disable-powersave.conf /etc/NetworkManager/conf.d/disable-powersave.conf
+
+# iwd backend check (alternative to default wpa_supplicant, often more stable for Intel)
+echo "🔧 Checking iwd dependency..."
+if ! pacman -Q iwd &>/dev/null; then
+    echo "⚠️  iwd not installed. wifi_backend.conf expects iwd."
+    echo "   Install with: sudo pacman -S iwd"
+    echo "   Then enable:  sudo systemctl enable --now iwd"
+else
+    echo "  ✓ iwd installed"
+fi
+
+# === 5. modprobe.d tweak (disable kernel-level WiFi power save) ===
+echo "⚙️  Installing modprobe.d tweak..."
+install -d -m 755 /etc/modprobe.d
+if [ -f /etc/modprobe.d/iwlwifi.conf ]; then
+    cp /etc/modprobe.d/iwlwifi.conf /etc/modprobe.d/iwlwifi.conf.bak
+    echo "  (backed up existing /etc/modprobe.d/iwlwifi.conf to .bak)"
+fi
+install -m 644 -o root -g root etc/modprobe.d/iwlwifi.conf /etc/modprobe.d/iwlwifi.conf
+
+# === 6. Verifikasi ===
 echo ""
 echo "✅ Install selesai. Verifikasi:"
-echo "  - /home/$SUDO_USER/.local/bin/fix-wifi: $(ls -la /home/$SUDO_USER/.local/bin/fix-wifi | awk '{print $1}')"
+echo "  - $USER_HOME/.local/bin/fix-wifi: $(ls -la "$USER_HOME/.local/bin/fix-wifi" | awk '{print $1}')"
 echo "  - /etc/sudoers.d/99-fix-wifi: $(ls -la /etc/sudoers.d/99-fix-wifi | awk '{print $1}')"
 echo "  - /etc/NetworkManager/dispatcher.d/99-wifi-fix: $(ls -la /etc/NetworkManager/dispatcher.d/99-wifi-fix | awk '{print $1}')"
+echo "  - /etc/NetworkManager/conf.d/wifi_backend.conf: $(ls -la /etc/NetworkManager/conf.d/wifi_backend.conf | awk '{print $1}')"
+echo "  - /etc/NetworkManager/conf.d/disable-powersave.conf: $(ls -la /etc/NetworkManager/conf.d/disable-powersave.conf | awk '{print $1}')"
+echo "  - /etc/modprobe.d/iwlwifi.conf: $(ls -la /etc/modprobe.d/iwlwifi.conf | awk '{print $1}')"
 echo ""
 echo "🧪 Test manual: sudo fix-wifi"
 echo "📋 Logs: journalctl -t wifi-fix -t fix-wifi -f"
+echo "🔄 Reload NM to apply new conf.d: sudo systemctl reload NetworkManager"

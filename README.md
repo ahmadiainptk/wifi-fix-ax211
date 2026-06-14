@@ -126,9 +126,31 @@ wifi-fix-ax211/
 ├── scripts/
 │   └── fix-wifi        # Main reload script
 ├── etc/
-│   └── 99-wifi-fix     # NM dispatcher
+│   ├── 99-wifi-fix                  # NM dispatcher
+│   ├── NetworkManager/
+│   │   └── conf.d/                  # NM tweaks (iwd backend, no powersave)
+│   └── modprobe.d/                  # iwlwifi kernel module tweaks
 └── assets/             # Screenshots, logo
 ```
+
+## 🛠️ Optional Configuration Tweaks
+
+The repo also includes recommended NetworkManager + modprobe tweaks that complement the dispatcher:
+
+### `etc/NetworkManager/conf.d/wifi_backend.conf`
+Use **iwd** instead of default wpa_supplicant as the WiFi backend. iwd is often more stable for Intel AX-series chips.
+- Requires: `sudo pacman -S iwd && sudo systemctl enable --now iwd`
+- `wifi.backend=iwd`
+
+### `etc/NetworkManager/conf.d/disable-powersave.conf`
+Disable NetworkManager-level WiFi power saving.
+- `wifi.powersave=2` (2 = disabled)
+
+### `etc/modprobe.d/iwlwifi.conf`
+Disable kernel-level iwlwifi power save + U-APSD (often cause drop on Intel AX).
+- `options iwlwifi power_save=0 uapsd_disable=1`
+
+All three are installed automatically by `install.sh`. They address the **root cause** (aggressive power management), while the dispatcher handles **workarounds** when it still drops.
 
 ## 🔍 Troubleshooting
 
